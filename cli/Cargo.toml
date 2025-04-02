@@ -1,0 +1,16 @@
+[package]
+name = "picobundler"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/blepfx/picobundler"
+description = "An audio plugin bundler for Rust projects"
+
+[dependencies]
+bpaf = { version = "0.9.19", features = ["bright-color"] }
+owo-colors = { version = "4.2.0", features = ["supports-colors"] }
+console = "0.15.10"
+
+tinyjson = "2.5.1"
+target-lexicon = "0.13.1"
+reflink = "0.1.3"

@@ -1,0 +1,7 @@
+[package]
+name = "example-clap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "400eb3156f221073fbcaf95607b56842272d134b" }

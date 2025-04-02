@@ -1,0 +1,6 @@
+[submodule "clap-wrapper"]
+	path = cmake/clap-wrapper
+	url = https://github.com/free-audio/clap-wrapper
+[submodule "clap"]
+	path = cmake/clap
+	url = https://github.com/free-audio/clap

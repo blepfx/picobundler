@@ -1,0 +1,5 @@
+[workspace]
+members = ["examples/example-clap", "cli"]
+
+[workspace.metadata.picobundler]
+local-cmake-path = "cmake"
