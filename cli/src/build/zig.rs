@@ -20,7 +20,7 @@ pub fn zig_triple(triple: &Triple, glibc: Option<String>) -> Result<String> {
         }
         _ => {
             return Err(
-                Error::new(format!("unsupported target: {}", triple.operating_system)).with_note(
+                Error::new(format!("unsupported target: {}", triple)).with_note(
                     "unsupported operating system: only linux, macos, and windows are supported",
                 ),
             );
@@ -36,12 +36,14 @@ pub fn zig_triple(triple: &Triple, glibc: Option<String>) -> Result<String> {
             target.push('-');
             target.push_str("musl");
         }
+        target_lexicon::Environment::Msvc => {
+            target.push('-');
+            target.push_str("msvc");
+        }
         target_lexicon::Environment::Unknown => {}
         _ => {
-            return Err(
-                Error::new(format!("unsupported target: {}", triple.environment))
-                    .with_note("unsupported environment: only gnu and musl are supported"),
-            );
+            return Err(Error::new(format!("unsupported target: {}", triple))
+                .with_note("unsupported environment: only gnu, musl and msvc are supported"));
         }
     };
 

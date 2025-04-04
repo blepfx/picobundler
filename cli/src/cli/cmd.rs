@@ -188,10 +188,14 @@ fn format_program(cmd: &[Component]) -> String {
                 let _ = write!(buffer, "{}", cmd.bright_blue().bold());
             }
             Component::Arg(arg) => {
-                let _ = write!(buffer, " {}", arg);
+                let _ = write!(buffer, " {}", arg.bright_black());
             }
             Component::ArgSecret(arg) => {
-                let _ = write!(buffer, " {}**", arg.chars().take(2).collect::<String>());
+                let _ = write!(
+                    buffer,
+                    " {}**",
+                    arg.chars().take(3).collect::<String>().bright_black()
+                );
             }
         }
     }

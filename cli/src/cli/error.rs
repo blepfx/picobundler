@@ -28,6 +28,11 @@ impl Error {
         self.0.note.push(note.to_string());
         self
     }
+
+    pub fn with_message<T: Display>(mut self, message: T) -> Self {
+        self.0.message = message.to_string();
+        self
+    }
 }
 
 impl<T: std::fmt::Display> From<T> for Error {

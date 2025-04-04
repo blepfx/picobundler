@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
-use target_lexicon::{OperatingSystem, Triple};
+use target_lexicon::{Environment, OperatingSystem, Triple};
 use tinyjson::JsonValue;
 
 #[derive(Debug, Copy, Clone)]
@@ -24,13 +24,13 @@ pub struct CargoBuild {
     pub target_dir: PathBuf,
     pub packages: Vec<String>,
     pub profile: String,
-    pub target: Vec<Triple>,
+    pub target: Triple,
     pub features: Vec<String>,
     pub all_features: bool,
     pub no_default_features: bool,
 }
 
-pub fn cargo_build(build: CargoBuild) -> Result<HashMap<(Triple, String), PathBuf>> {
+pub fn cargo_build(build: CargoBuild) -> Result<HashMap<String, PathBuf>> {
     report_span!("compiling using cargo");
 
     let mut command = Command::new(&cargo_cmd());
@@ -42,10 +42,7 @@ pub fn cargo_build(build: CargoBuild) -> Result<HashMap<(Triple, String), PathBu
 
     command = command.arg("--target-dir").arg(&build.target_dir);
     command = command.arg("--profile").arg(&build.profile);
-
-    for target in &build.target {
-        command = command.arg("--target").arg(target.to_string());
-    }
+    command = command.arg("--target").arg(build.target.to_string());
 
     for package in &build.packages {
         command = command.arg("-p").arg(package);
@@ -72,6 +69,8 @@ pub fn cargo_build(build: CargoBuild) -> Result<HashMap<(Triple, String), PathBu
         }
     }
 
+    // command = command.arg("--").arg("--print=native-static-libs");
+
     let mut compiler_messages = vec![];
 
     command
@@ -89,24 +88,29 @@ pub fn cargo_build(build: CargoBuild) -> Result<HashMap<(Triple, String), PathBu
                 report_message!("{}", line.trim());
             },
         )
-        .map_err(|_| {
-            Error::new(compiler_messages.join("\n"))
+        .map_err(|e| {
+            let message = if compiler_messages.is_empty() {
+                "compilation error. check the cargo output in --verbose mode for more info"
+                    .to_string()
+            } else {
+                compiler_messages.join("\n")
+            };
+
+            e.with_message(message)
                 .with_note("compilation failure while running cargo")
         })?;
 
     let mut output = HashMap::new();
-    for package in &build.packages {
-        for target in &build.target {
-            let path = cargo_output_path(
-                &build.target_dir,
-                &build.profile,
-                target,
-                package,
-                build.crate_type,
-            )?;
+    for package in build.packages {
+        let path = cargo_output_path(
+            &build.target_dir,
+            &build.profile,
+            &build.target,
+            &package,
+            build.crate_type,
+        )?;
 
-            output.insert((target.clone(), package.clone()), path);
-        }
+        output.insert(package, path);
     }
 
     Ok(output)
@@ -224,26 +228,29 @@ fn cargo_output_path(
     crate_type: CargoCrateType,
 ) -> Result<PathBuf> {
     let package_name = package_name.replace("-", "_");
-    let filename = match (triple.operating_system, crate_type) {
-        (OperatingSystem::Linux, CargoCrateType::Cdylib) => {
+    let filename = match (triple.operating_system, triple.environment, crate_type) {
+        (OperatingSystem::Linux, _, CargoCrateType::Cdylib) => {
             format!("lib{}.so", package_name)
         }
-        (OperatingSystem::Linux, CargoCrateType::Staticlib) => {
+        (OperatingSystem::Linux, _, CargoCrateType::Staticlib) => {
             format!("lib{}.a", package_name)
         }
-        (OperatingSystem::MacOSX(_), CargoCrateType::Cdylib)
-        | (OperatingSystem::Darwin(_), CargoCrateType::Cdylib) => {
+        (OperatingSystem::MacOSX(_), _, CargoCrateType::Cdylib)
+        | (OperatingSystem::Darwin(_), _, CargoCrateType::Cdylib) => {
             format!("lib{}.dylib", package_name)
         }
-        (OperatingSystem::MacOSX(_), CargoCrateType::Staticlib)
-        | (OperatingSystem::Darwin(_), CargoCrateType::Staticlib) => {
+        (OperatingSystem::MacOSX(_), _, CargoCrateType::Staticlib)
+        | (OperatingSystem::Darwin(_), _, CargoCrateType::Staticlib) => {
             format!("lib{}.a", package_name)
         }
-        (OperatingSystem::Windows, CargoCrateType::Cdylib) => {
+        (OperatingSystem::Windows, _, CargoCrateType::Cdylib) => {
             format!("{}.dll", package_name)
         }
-        (OperatingSystem::Windows, CargoCrateType::Staticlib) => {
+        (OperatingSystem::Windows, Environment::Msvc, CargoCrateType::Staticlib) => {
             format!("{}.lib", package_name)
+        }
+        (OperatingSystem::Windows, _, CargoCrateType::Staticlib) => {
+            format!("lib{}.a", package_name)
         }
         _ => {
             return Err(Error::new(format!(

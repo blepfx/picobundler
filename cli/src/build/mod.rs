@@ -64,7 +64,7 @@ impl Display for BuildTarget {
         match self {
             Self::Triple(triple) => write!(f, "{}", triple),
             Self::TripleGlibc(triple, glibc) => write!(f, "{}.{}", triple, glibc),
-            Self::AppleUniversal => write!(f, "universal2-apple-darwin"),
+            Self::AppleUniversal => write!(f, "universal-apple-darwin"),
         }
     }
 }
@@ -73,7 +73,7 @@ impl FromStr for BuildTarget {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if s.eq_ignore_ascii_case("universal2-apple-darwin") {
+        if s.eq_ignore_ascii_case("universal-apple-darwin") {
             Ok(Self::AppleUniversal)
         } else if let Some(index) = s.find("gnu.") {
             Ok(Self::TripleGlibc(
@@ -199,17 +199,25 @@ pub fn build(request: &BuildRequest) -> Result<Vec<BuildArtifact>> {
     for ((target, package), path) in output_libraries {
         let (zig_triple, osx_arch) = match &target {
             BuildTarget::Triple(triple) => {
-                if matches!(triple.operating_system, OperatingSystem::Darwin(_)) {
+                let osx_arch = if matches!(triple.operating_system, OperatingSystem::Darwin(_)) {
                     let osx_arch = match triple.architecture {
                         target_lexicon::Architecture::Aarch64(_) => Some("arm64".to_string()),
                         target_lexicon::Architecture::X86_64 => Some("x86_64".to_string()),
                         _ => None,
                     };
 
-                    (Some(zig_triple(triple, None)?), osx_arch)
+                    osx_arch
                 } else {
-                    (Some(zig_triple(triple, None)?), None)
-                }
+                    None
+                };
+
+                let zig_triple = if target.is_supported(&target_lexicon::HOST) {
+                    None
+                } else {
+                    Some(zig_triple(triple, None)?)
+                };
+
+                (zig_triple, osx_arch)
             }
 
             BuildTarget::TripleGlibc(triple, glibc) => {
@@ -269,51 +277,64 @@ fn build_libraries(
     all_features: bool,
     no_default_features: bool,
 ) -> Result<HashMap<(BuildTarget, String), PathBuf>> {
-    let apple_aarch64 = Triple::from_str("aarch64-apple-darwin-gnu")?;
-    let apple_x86_64 = Triple::from_str("x86_64-apple-darwin-gnu")?;
-
     let mut libraries = HashMap::new();
     for target in targets {
-        let rust_targets = match &target {
-            BuildTarget::Triple(triple) => vec![triple.clone()],
-            BuildTarget::TripleGlibc(triple, _) => vec![triple.clone()],
-            BuildTarget::AppleUniversal => vec![apple_aarch64.clone(), apple_x86_64.clone()],
-        };
+        match &target {
+            BuildTarget::Triple(triple) | BuildTarget::TripleGlibc(triple, _) => {
+                let output = cargo_build(CargoBuild {
+                    crate_type,
+                    target_dir: target_dir.clone(),
+                    packages: packages.clone(),
+                    profile: profile.clone(),
+                    target: triple.clone(),
+                    features: features.clone(),
+                    all_features,
+                    no_default_features,
+                })?;
 
-        let output = cargo_build(CargoBuild {
-            crate_type,
-            target_dir: target_dir.clone(),
-            packages: packages.clone(),
-            profile: profile.clone(),
-            target: rust_targets,
-            features: features.clone(),
-            all_features,
-            no_default_features,
-        })?;
+                for (package, path) in output {
+                    libraries.insert((target.clone(), package), path);
+                }
+            }
 
-        match target {
             BuildTarget::AppleUniversal => {
+                let output_aarch64 = cargo_build(CargoBuild {
+                    crate_type,
+                    target_dir: target_dir.clone(),
+                    packages: packages.clone(),
+                    profile: profile.clone(),
+                    target: Triple::from_str("aarch64-apple-darwin")?,
+                    features: features.clone(),
+                    all_features,
+                    no_default_features,
+                })?;
+
+                let output_x86_64 = cargo_build(CargoBuild {
+                    crate_type,
+                    target_dir: target_dir.clone(),
+                    packages: packages.clone(),
+                    profile: profile.clone(),
+                    target: Triple::from_str("x86_64-apple-darwin")?,
+                    features: features.clone(),
+                    all_features,
+                    no_default_features,
+                })?;
+
                 for package in &packages {
-                    let aarch64 = output.get(&(apple_aarch64.clone(), package.clone()));
-                    let x86_64 = output.get(&(apple_x86_64.clone(), package.clone()));
+                    let aarch64 = output_aarch64.get(package);
+                    let x86_64 = output_x86_64.get(package);
 
                     if let (Some(aarch64), Some(x86_64)) = (aarch64, x86_64) {
-                        let universal = target_dir.join("universal2-apple-darwin");
+                        let universal = target_dir.join("universal-apple-darwin");
                         let _ = std::fs::create_dir_all(&universal);
 
                         let universal = universal.join(aarch64.file_name().unwrap_or_default());
                         apple::lipo(&[aarch64, x86_64], &universal)?;
-                        libraries.insert((BuildTarget::AppleUniversal, package.clone()), universal);
+                        libraries.insert((target.clone(), package.clone()), universal);
                     }
                 }
             }
-
-            _ => {
-                for ((_, package), path) in output {
-                    libraries.insert((target.clone(), package), path);
-                }
-            }
-        }
+        };
     }
 
     Ok(libraries)

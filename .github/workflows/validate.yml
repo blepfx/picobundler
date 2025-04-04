@@ -1,0 +1,94 @@
+name: Validate
+
+on: [push]
+jobs:
+  validate-linux-x86_64:
+    name: Validate (Linux x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+            submodules: recursive
+
+      - name: Install `zig`
+        uses: mlugg/setup-zig@v1
+        with:
+            version: 0.14.0
+
+      - name: Install `pluginval`
+        shell: bash
+        run: |
+            curl -L "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Linux.zip" -o pluginval.zip
+            unzip pluginval
+
+      - name: Run `picobundler`
+        shell: bash
+        run: |
+            cargo run -p picobundler -- -p example-clap --vst3=gpl --clap --target x86_64-unknown-linux-gnu.2.30 --install
+            
+      - name: Run `pluginval`
+        shell: bash
+        run: |
+            ./pluginval --validate-in-process --strictness-level 5 --output-dir "./target/pluginval" "./target/bundled/x86_64-unknown-linux-gnu.2.30/example-clap.vst3" || exit 1
+
+
+  validate-windows-x86_64:
+    name: Validate (Windows x86_64)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+            submodules: recursive
+
+      - name: Install `pluginval`
+        shell: bash
+        run: |
+            choco install pluginval
+
+      - name: Run `picobundler`
+        shell: bash
+        run: |
+            cargo run -p picobundler -- -p example-clap --vst3=gpl --clap --target x86_64-pc-windows-msvc --install
+
+      - name: Run `pluginval`
+        shell: bash
+        run: |
+            pluginval.exe --validate-in-process --strictness-level 5 --output-dir "./target/pluginval" "./target/bundled/x86_64-pc-windows-msvc/example-clap.vst3"
+            if %ERRORLEVEL% neq 0 exit /b 1
+      
+  validate-macos-x86_64:
+    name: Validate (macOS x86_64)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+            submodules: recursive
+
+      - name: Install `pluginval`
+        shell: bash
+        run: |
+            curl -L "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip" -o pluginval.zip
+            unzip pluginval
+
+      - name: Install x86_64 rust toolchain
+        shell: bash
+        run: |
+            rustup target add x86_64-apple-darwin
+
+      - name: Run `picobundler`
+        shell: bash
+        run: |
+            cargo run -p picobundler -- -p example-clap --vst3=gpl --auv2 --clap --target universal-apple-darwin --install
+
+      - name: Run `pluginval` for VST3
+        shell: bash
+        run: |
+            pluginval.app/Contents/MacOS/pluginval --validate-in-process --output-dir "./target/pluginval" "./target/bundled/universal-apple-darwin/example-clap.vst3" || exit 1
+
+      - name: Run `pluginval` for AUV2
+        shell: bash
+        run: |
+            pluginval.app/Contents/MacOS/pluginval --validate-in-process --output-dir "./target/pluginval" "./target/bundled/universal-apple-darwin/example-clap.component" || exit 1

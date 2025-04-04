@@ -24,7 +24,7 @@ pub fn codesign_bundle(bundle: &Path, identity: Option<&str>) -> Result<()> {
                 })
         }
         None => {
-            report_span!("ad-hoc signing bundle: {}", bundle.display().bold());
+            report_span!("signing bundle {} (ad-hoc)", bundle.display().bold());
 
             Command::new("codesign")
                 .arg("--force")

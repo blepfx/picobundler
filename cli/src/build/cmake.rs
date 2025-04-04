@@ -44,14 +44,26 @@ pub fn build_wrapper(options: ClapWrapperOptions) -> Result<ClapWrapperOutput> {
         ("PICO_SDK_VST3", options.vst3.clone().map(|v| v.into_os_string()).unwrap_or_default()),
         ("PICO_BUILD_ZIG_TARGET", options.zig_triple.map(|v| v.into()).unwrap_or_default()),
         ("PICO_BUILD_OSX_ARCH", options.osx_arch.clone().map(|v| v.into()).unwrap_or_default()),
+        ("PICO_BUILD_TYPE", "Release".into()) //TODO: use cargo profile to set this
     ];
 
     Command::new("cmake")
         .arg(&options.cmake_dir)
         .cwd(&build_dir)
         .envs(envs.iter().map(|(k, v)| (k, v.as_os_str())))
-        .run_stdout(|line| {
-            report_message!("{}", line);
+        .run_stdout_stderr(
+            |line| {
+                report_message!("{}", line);
+            },
+            |line| {
+                report_message!("{}", line);
+            },
+        )
+        .map_err(|e| {
+            e.with_message(format!(
+                "failed to configure {}. check the output in --verbose mode for more info",
+                "clap-wrapper".bold()
+            ))
         })?;
 
     Command::new("cmake")
@@ -59,8 +71,19 @@ pub fn build_wrapper(options: ClapWrapperOptions) -> Result<ClapWrapperOutput> {
         .arg(".")
         .cwd(&build_dir)
         .envs(envs.iter().map(|(k, v)| (k, v.as_os_str())))
-        .run_stdout(|line| {
-            report_message!("{}", line);
+        .run_stdout_stderr(
+            |line| {
+                report_message!("{}", line);
+            },
+            |line| {
+                report_message!("{}", line);
+            },
+        )
+        .map_err(|e| {
+            e.with_message(format!(
+                "failed to build {}. check the output in --verbose mode for more info",
+                "clap-wrapper".bold()
+            ))
         })?;
 
     let output = build_dir
