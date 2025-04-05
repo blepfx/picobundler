@@ -30,7 +30,14 @@ pub struct CargoBuild {
     pub no_default_features: bool,
 }
 
-pub fn cargo_build(build: CargoBuild) -> Result<HashMap<String, PathBuf>> {
+#[derive(Debug, Clone)]
+pub struct CargoArtifact {
+    pub package: String,
+    pub path: PathBuf,
+    pub native_static_libs: Option<String>,
+}
+
+pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
     report_span!("compiling using cargo");
 
     let mut command = Command::new(&cargo_cmd());
@@ -66,23 +73,23 @@ pub fn cargo_build(build: CargoBuild) -> Result<HashMap<String, PathBuf>> {
         }
         CargoCrateType::Staticlib => {
             command = command.arg("--crate-type=staticlib");
+            command = command.arg("--").arg("--print=native-static-libs");
         }
     }
 
-    // command = command.arg("--").arg("--print=native-static-libs");
-
-    let mut compiler_messages = vec![];
+    let mut compiler_messages = Vec::new();
+    let mut native_static_libs = HashMap::new();
 
     command
         .run_stdout_stderr(
-            |line| {
-                if line.starts_with('{') {
-                    if let Ok(CargoMessage::CompilerMessage { message }) =
-                        line.parse::<CargoMessage>()
-                    {
-                        compiler_messages.push(message);
-                    }
+            |line| match line.parse::<CargoMessage>() {
+                Ok(CargoMessage::NativeStaticLibs { package, libs }) => {
+                    native_static_libs.insert(package, libs);
                 }
+                Ok(CargoMessage::CompilerMessage { rendered, .. }) => {
+                    compiler_messages.push(rendered);
+                }
+                _ => {}
             },
             |line| {
                 report_message!("{}", line.trim());
@@ -100,8 +107,9 @@ pub fn cargo_build(build: CargoBuild) -> Result<HashMap<String, PathBuf>> {
                 .with_note("compilation failure while running cargo")
         })?;
 
-    let mut output = HashMap::new();
+    let mut artifacts = Vec::new();
     for package in build.packages {
+        let native_static_libs = native_static_libs.remove(&cargo_normalize_package_name(&package));
         let path = cargo_output_path(
             &build.target_dir,
             &build.profile,
@@ -110,10 +118,18 @@ pub fn cargo_build(build: CargoBuild) -> Result<HashMap<String, PathBuf>> {
             build.crate_type,
         )?;
 
-        output.insert(package, path);
+        if let Some(ref libs) = native_static_libs {
+            report_message!("extracted native-static-libs for {}: {}", package, libs);
+        }
+
+        artifacts.push(CargoArtifact {
+            package,
+            path,
+            native_static_libs,
+        });
     }
 
-    Ok(output)
+    Ok(artifacts)
 }
 
 pub fn cargo_workspace_dir() -> Result<PathBuf> {
@@ -182,8 +198,10 @@ fn cargo_cmd() -> String {
     var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
+#[derive(Debug)]
 enum CargoMessage {
-    CompilerMessage { message: String },
+    NativeStaticLibs { package: String, libs: String },
+    CompilerMessage { rendered: String },
     Other,
 }
 
@@ -191,7 +209,11 @@ impl FromStr for CargoMessage {
     type Err = ();
 
     fn from_str(s: &str) -> std::result::Result<Self, ()> {
-        let value = tinyjson::JsonValue::from_str(s)
+        if !s.starts_with('{') {
+            return Err(());
+        }
+
+        let mut value = tinyjson::JsonValue::from_str(s)
             .ok()
             .and_then(|x| match x {
                 JsonValue::Object(x) => Some(x),
@@ -206,18 +228,47 @@ impl FromStr for CargoMessage {
             .unwrap_or_default();
 
         if reason == "compiler-message" {
-            let message = value["message"]["rendered"]
-                .get::<String>()
-                .map(|x| x.as_str())
-                .ok_or(())?;
+            let mut info_message = match value.remove("message") {
+                Some(JsonValue::Object(x)) => x,
+                _ => return Err(()),
+            };
 
-            Ok(CargoMessage::CompilerMessage {
-                message: message.to_string(),
-            })
+            let mut info_target = match value.remove("target") {
+                Some(JsonValue::Object(x)) => x,
+                _ => return Err(()),
+            };
+
+            let rendered = match info_message.remove("rendered") {
+                Some(JsonValue::String(x)) => x,
+                _ => return Err(()),
+            };
+
+            let message = match info_message.remove("message") {
+                Some(JsonValue::String(x)) => x,
+                _ => return Err(()),
+            };
+
+            let package = match info_target.remove("name") {
+                Some(JsonValue::String(x)) => x,
+                _ => return Err(()),
+            };
+
+            if let Some(libs) = message.strip_prefix("native-static-libs: ") {
+                return Ok(CargoMessage::NativeStaticLibs {
+                    package,
+                    libs: libs.to_string(),
+                });
+            }
+
+            Ok(CargoMessage::CompilerMessage { rendered })
         } else {
             Ok(CargoMessage::Other)
         }
     }
+}
+
+fn cargo_normalize_package_name(name: &str) -> String {
+    name.replace("-", "_")
 }
 
 fn cargo_output_path(
@@ -227,7 +278,7 @@ fn cargo_output_path(
     package_name: &str,
     crate_type: CargoCrateType,
 ) -> Result<PathBuf> {
-    let package_name = package_name.replace("-", "_");
+    let package_name = cargo_normalize_package_name(package_name);
     let filename = match (triple.operating_system, triple.environment, crate_type) {
         (OperatingSystem::Linux, _, CargoCrateType::Cdylib) => {
             format!("lib{}.so", package_name)

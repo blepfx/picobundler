@@ -166,12 +166,33 @@ pub fn build(request: &BuildRequest) -> Result<Vec<BuildArtifact>> {
         ensure_cmake_installed()?;
     }
 
-    let output_libraries = build_libraries(
-        if use_cmake {
-            CargoCrateType::Staticlib
-        } else {
-            CargoCrateType::Cdylib
-        },
+    if !use_cmake {
+        let artifacts = build_libraries(
+            CargoCrateType::Cdylib,
+            request.target_dir.clone(),
+            request.profile.clone(),
+            request.packages.clone(),
+            request.targets.clone(),
+            request.features.clone(),
+            request.all_features,
+            request.no_default_features,
+        )?;
+
+        return Ok(artifacts
+            .into_iter()
+            .map(|artifact| BuildArtifact {
+                package: artifact.package,
+                target: artifact.target,
+                format: PluginFormat::Clap,
+                path: artifact.path,
+            })
+            .collect());
+    }
+
+    let mut output = Vec::new();
+    let (pico_cmake, vst3_sdk) = load_dependencies(request.vst3.as_ref(), &request.target_dir)?;
+    let artifacts = build_libraries(
+        CargoCrateType::Staticlib,
         request.target_dir.clone(),
         request.profile.clone(),
         request.packages.clone(),
@@ -181,89 +202,55 @@ pub fn build(request: &BuildRequest) -> Result<Vec<BuildArtifact>> {
         request.no_default_features,
     )?;
 
-    if !use_cmake {
-        return Ok(output_libraries
-            .into_iter()
-            .map(|((target, package), path)| BuildArtifact {
-                package,
-                target,
-                format: PluginFormat::Clap,
-                path,
-            })
-            .collect());
-    }
-
-    let mut artifacts = Vec::new();
-    let (pico_cmake, vst3_sdk) = load_dependencies(request.vst3.as_ref(), &request.target_dir)?;
-
-    for ((target, package), path) in output_libraries {
-        let (zig_triple, osx_arch) = match &target {
-            BuildTarget::Triple(triple) => {
-                let osx_arch = if matches!(triple.operating_system, OperatingSystem::Darwin(_)) {
-                    let osx_arch = match triple.architecture {
-                        target_lexicon::Architecture::Aarch64(_) => Some("arm64".to_string()),
-                        target_lexicon::Architecture::X86_64 => Some("x86_64".to_string()),
-                        _ => None,
-                    };
-
-                    osx_arch
-                } else {
-                    None
-                };
-
-                let zig_triple = if target.is_supported(&target_lexicon::HOST) {
-                    None
-                } else {
-                    Some(zig_triple(triple, None)?)
-                };
-
-                (zig_triple, osx_arch)
-            }
-
-            BuildTarget::TripleGlibc(triple, glibc) => {
-                (Some(zig_triple(triple, Some(glibc.clone()))?), None)
-            }
-
-            BuildTarget::AppleUniversal => (None, Some("arm64;x86_64".to_string())),
-        };
-
-        let output = build_wrapper(ClapWrapperOptions {
+    for artifact in artifacts {
+        let clap_wrapper = build_wrapper(ClapWrapperOptions {
             cmake_dir: pico_cmake.clone(),
             build_dir: request.target_dir.join("clap-wrapper/build"),
-            package_name: package.clone(),
-            static_lib: path.clone(),
-            zig_triple,
-            osx_arch,
+            package_name: artifact.package.clone(),
+            static_lib: artifact.path,
+            zig_triple: artifact.zig_triple,
+            osx_arch: artifact.osx_arch,
+            native_static_libs: artifact.native_static_libs,
             vst3: vst3_sdk.clone(),
             auv2: request.auv2,
         })?;
 
-        if let Some(vst3) = output.vst3 {
-            artifacts.push(BuildArtifact {
-                package: package.clone(),
-                target: target.clone(),
+        if let Some(vst3) = clap_wrapper.vst3 {
+            output.push(BuildArtifact {
+                package: artifact.package.clone(),
+                target: artifact.target.clone(),
                 format: PluginFormat::Vst3,
                 path: vst3,
             });
         }
-        if let Some(auv2) = output.auv2 {
-            artifacts.push(BuildArtifact {
-                package: package.clone(),
-                target: target.clone(),
+        if let Some(auv2) = clap_wrapper.auv2 {
+            output.push(BuildArtifact {
+                package: artifact.package.clone(),
+                target: artifact.target.clone(),
                 format: PluginFormat::Auv2,
                 path: auv2,
             });
         }
 
-        artifacts.push(BuildArtifact {
-            package,
-            target,
+        output.push(BuildArtifact {
+            package: artifact.package,
+            target: artifact.target,
             format: PluginFormat::Clap,
-            path: output.clap,
+            path: clap_wrapper.clap,
         });
     }
 
-    Ok(artifacts)
+    Ok(output)
+}
+
+struct IntermediateArtifact {
+    target: BuildTarget,
+    package: String,
+    path: PathBuf,
+
+    native_static_libs: Option<String>,
+    zig_triple: Option<String>,
+    osx_arch: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -276,12 +263,25 @@ fn build_libraries(
     features: Vec<String>,
     all_features: bool,
     no_default_features: bool,
-) -> Result<HashMap<(BuildTarget, String), PathBuf>> {
-    let mut libraries = HashMap::new();
+) -> Result<Vec<IntermediateArtifact>> {
+    let mut output = Vec::new();
     for target in targets {
         match &target {
-            BuildTarget::Triple(triple) | BuildTarget::TripleGlibc(triple, _) => {
-                let output = cargo_build(CargoBuild {
+            BuildTarget::Triple(triple) => {
+                let osx_arch = match triple.architecture {
+                    _ if matches!(triple.operating_system, OperatingSystem::MacOSX(_)) => None,
+                    target_lexicon::Architecture::Aarch64(_) => Some("arm64".to_string()),
+                    target_lexicon::Architecture::X86_64 => Some("x86_64".to_string()),
+                    _ => None,
+                };
+
+                let zig_triple = if target.is_supported(&target_lexicon::HOST) {
+                    None
+                } else {
+                    Some(zig_triple(triple, None)?)
+                };
+
+                let artifacts = cargo_build(CargoBuild {
                     crate_type,
                     target_dir: target_dir.clone(),
                     packages: packages.clone(),
@@ -292,13 +292,46 @@ fn build_libraries(
                     no_default_features,
                 })?;
 
-                for (package, path) in output {
-                    libraries.insert((target.clone(), package), path);
+                for artifact in artifacts {
+                    output.push(IntermediateArtifact {
+                        package: artifact.package,
+                        target: target.clone(),
+                        path: artifact.path,
+                        native_static_libs: artifact.native_static_libs,
+                        zig_triple: zig_triple.clone(),
+                        osx_arch: osx_arch.clone(),
+                    });
+                }
+            }
+
+            BuildTarget::TripleGlibc(triple, glibc) => {
+                let zig_triple = zig_triple(triple, Some(glibc))?;
+
+                let artifacts = cargo_build(CargoBuild {
+                    crate_type,
+                    target_dir: target_dir.clone(),
+                    packages: packages.clone(),
+                    profile: profile.clone(),
+                    target: triple.clone(),
+                    features: features.clone(),
+                    all_features,
+                    no_default_features,
+                })?;
+
+                for artifact in artifacts {
+                    output.push(IntermediateArtifact {
+                        package: artifact.package,
+                        target: target.clone(),
+                        path: artifact.path,
+                        native_static_libs: artifact.native_static_libs,
+                        zig_triple: Some(zig_triple.clone()),
+                        osx_arch: None,
+                    });
                 }
             }
 
             BuildTarget::AppleUniversal => {
-                let output_aarch64 = cargo_build(CargoBuild {
+                let mut output_aarch64 = cargo_build(CargoBuild {
                     crate_type,
                     target_dir: target_dir.clone(),
                     packages: packages.clone(),
@@ -307,9 +340,12 @@ fn build_libraries(
                     features: features.clone(),
                     all_features,
                     no_default_features,
-                })?;
+                })?
+                .into_iter()
+                .map(|x| (x.package.clone(), x))
+                .collect::<HashMap<_, _>>();
 
-                let output_x86_64 = cargo_build(CargoBuild {
+                let mut output_x86_64 = cargo_build(CargoBuild {
                     crate_type,
                     target_dir: target_dir.clone(),
                     packages: packages.clone(),
@@ -318,26 +354,38 @@ fn build_libraries(
                     features: features.clone(),
                     all_features,
                     no_default_features,
-                })?;
+                })?
+                .into_iter()
+                .map(|x| (x.package.clone(), x))
+                .collect::<HashMap<_, _>>();
 
                 for package in &packages {
-                    let aarch64 = output_aarch64.get(package);
-                    let x86_64 = output_x86_64.get(package);
+                    let aarch64 = output_aarch64.remove(package);
+                    let x86_64 = output_x86_64.remove(package);
 
                     if let (Some(aarch64), Some(x86_64)) = (aarch64, x86_64) {
                         let universal = target_dir.join("universal-apple-darwin");
                         let _ = std::fs::create_dir_all(&universal);
 
-                        let universal = universal.join(aarch64.file_name().unwrap_or_default());
-                        apple::lipo(&[aarch64, x86_64], &universal)?;
-                        libraries.insert((target.clone(), package.clone()), universal);
+                        let universal =
+                            universal.join(aarch64.path.file_name().unwrap_or_default());
+                        apple::lipo(&[&aarch64.path, &x86_64.path], &universal)?;
+
+                        output.push(IntermediateArtifact {
+                            target: target.clone(),
+                            package: aarch64.package,
+                            path: universal,
+                            native_static_libs: aarch64.native_static_libs,
+                            zig_triple: None,
+                            osx_arch: Some("x86_64;arm64".to_string()),
+                        })
                     }
                 }
             }
         };
     }
 
-    Ok(libraries)
+    Ok(output)
 }
 
 fn load_dependencies(
