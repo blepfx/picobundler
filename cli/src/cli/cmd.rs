@@ -6,6 +6,7 @@ use std::{
     io::{BufRead, BufReader, Read},
     panic::resume_unwind,
     process::Stdio,
+    sync::mpsc::channel,
 };
 
 #[must_use]
@@ -129,8 +130,8 @@ impl Command {
 
     pub fn run_stdout_stderr(
         mut self,
-        stdout: impl FnMut(&str) + Send,
-        stderr: impl FnMut(&str),
+        mut stdout: impl FnMut(&str),
+        mut stderr: impl FnMut(&str),
     ) -> Result<()> {
         let program = format_program(&self.print);
         let mut result = self
@@ -141,15 +142,14 @@ impl Command {
             .spawn()
             .map_err(|e| format_error(&program, e, None))?;
 
-        std::thread::scope(|scope| {
-            let stdout_reader = scope.spawn(|| read_to_end(result.stdout.take().unwrap(), stdout));
-            read_to_end(result.stderr.take().unwrap(), stderr)?;
-            match stdout_reader.join() {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e),
-                Err(e) => resume_unwind(e),
-            }
-        })?;
+        read_double_pipe(
+            result.stdout.take().unwrap(),
+            result.stderr.take().unwrap(),
+            |line| match line {
+                Ok(line) => stdout(line),
+                Err(line) => stderr(line),
+            },
+        )?;
 
         let result = result.wait().map_err(|e| format_error(&program, e, None))?;
         if !result.success() {
@@ -237,4 +237,46 @@ fn read_to_end(reader: impl Read, mut stream: impl FnMut(&str)) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn read_double_pipe(
+    left: impl Read + Send,
+    right: impl Read + Send,
+    mut output: impl FnMut(std::result::Result<&str, &str>),
+) -> Result<()> {
+    let (sender, receiver) = channel();
+    let sender2 = sender.clone();
+
+    std::thread::scope(|scope| {
+        let left = scope.spawn(move || {
+            read_to_end(left, |line| {
+                sender.send(Ok(line.to_owned())).ok();
+            })
+        });
+
+        let right = scope.spawn(move || {
+            read_to_end(right, |line| {
+                sender2.send(Err(line.to_owned())).ok();
+            })
+        });
+
+        while let Some(line) = receiver.recv().ok() {
+            match line {
+                Ok(line) => output(Ok(&line)),
+                Err(line) => output(Err(&line)),
+            }
+        }
+
+        match left.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => resume_unwind(e),
+        }?;
+
+        match right.join() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => resume_unwind(e),
+        }
+    })
 }

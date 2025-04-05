@@ -2,7 +2,7 @@ use crate::cli::{Command, Error, Result};
 use owo_colors::OwoColorize;
 use target_lexicon::{OperatingSystem, Triple};
 
-pub fn zig_triple(triple: &Triple, glibc: Option<String>) -> Result<String> {
+pub fn zig_triple(triple: &Triple, glibc: Option<&str>) -> Result<String> {
     let mut target = String::new();
 
     target.push_str(&triple.architecture.to_string());
