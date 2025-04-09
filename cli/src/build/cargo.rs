@@ -45,6 +45,7 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
     command = command.arg("rustc");
     command = command.arg("--lib");
     command = command.arg("--message-format=json-diagnostic-rendered-ansi");
+    command = command.arg("--verbose");
     command = command.env("CARGO_TERM_PROGRESS_WHEN", "never");
 
     command = command.arg("--target-dir").arg(&build.target_dir);
@@ -76,6 +77,8 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
             command = command.arg("--").arg("--print=native-static-libs");
         }
     }
+
+    println!("cargo command: {:?}", command);
 
     let mut compiler_messages = Vec::new();
     let mut native_static_libs = HashMap::new();

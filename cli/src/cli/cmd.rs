@@ -2,7 +2,7 @@ use crate::cli::{Error, Result};
 use owo_colors::OwoColorize;
 use std::{
     ffi::OsStr,
-    fmt::{Display, Write},
+    fmt::{Debug, Display},
     io::{BufRead, BufReader, Read},
     panic::resume_unwind,
     process::Stdio,
@@ -85,7 +85,7 @@ impl Command {
     }
 
     pub fn run(mut self) -> Result<String> {
-        let program = format_program(&self.print);
+        let program = format!("{}", self);
         let output = self
             .inner
             .stdin(Stdio::null())
@@ -105,7 +105,7 @@ impl Command {
     }
 
     pub fn run_stdout(mut self, stream: impl FnMut(&str)) -> Result<()> {
-        let program = format_program(&self.print);
+        let program = format!("{}", self);
         let mut result = self
             .inner
             .stdin(Stdio::null())
@@ -133,7 +133,7 @@ impl Command {
         mut stdout: impl FnMut(&str),
         mut stderr: impl FnMut(&str),
     ) -> Result<()> {
-        let program = format_program(&self.print);
+        let program = format!("{}", self);
         let mut result = self
             .inner
             .stdin(Stdio::null())
@@ -164,43 +164,58 @@ impl Command {
     }
 }
 
+impl Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for component in &self.print {
+            match component {
+                Component::Env(key, value) => {
+                    write!(f, "{}={} ", key.bright_yellow().bold(), value.bright_blue())?;
+                }
+                Component::Cmd(cmd) => {
+                    write!(f, "{}", cmd.bright_blue().bold())?;
+                }
+                Component::Arg(arg) => {
+                    write!(f, " {}", arg.bright_black())?;
+                }
+                Component::ArgSecret(arg) => {
+                    write!(
+                        f,
+                        " {}**",
+                        arg.chars().take(3).collect::<String>().bright_black()
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for component in &self.print {
+            match component {
+                Component::Env(key, value) => {
+                    write!(f, "{}={} ", key, value)?;
+                }
+                Component::Cmd(cmd) => {
+                    write!(f, "{}", cmd)?;
+                }
+                Component::Arg(arg) | Component::ArgSecret(arg) => {
+                    write!(f, " {}", arg)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 enum Component {
     Env(String, String),
     Cmd(String),
     Arg(String),
     ArgSecret(String),
-}
-
-fn format_program(cmd: &[Component]) -> String {
-    let mut buffer = String::new();
-
-    for component in cmd {
-        match component {
-            Component::Env(key, value) => {
-                let _ = write!(
-                    buffer,
-                    "{}={} ",
-                    key.bright_yellow().bold(),
-                    value.bright_blue()
-                );
-            }
-            Component::Cmd(cmd) => {
-                let _ = write!(buffer, "{}", cmd.bright_blue().bold());
-            }
-            Component::Arg(arg) => {
-                let _ = write!(buffer, " {}", arg.bright_black());
-            }
-            Component::ArgSecret(arg) => {
-                let _ = write!(
-                    buffer,
-                    " {}**",
-                    arg.chars().take(3).collect::<String>().bright_black()
-                );
-            }
-        }
-    }
-
-    buffer
 }
 
 fn format_error(
