@@ -45,7 +45,6 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
     command = command.arg("rustc");
     command = command.arg("--lib");
     command = command.arg("--message-format=json-diagnostic-rendered-ansi");
-    command = command.arg("--verbose");
     command = command.env("CARGO_TERM_PROGRESS_WHEN", "never");
 
     command = command.arg("--target-dir").arg(&build.target_dir);
@@ -78,10 +77,9 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
         }
     }
 
-    println!("cargo command: {:?}", command);
-
     let mut compiler_messages = Vec::new();
     let mut native_static_libs = HashMap::new();
+    let mut link_paths = Vec::new();
 
     command
         .run_stdout_stderr(
@@ -91,6 +89,9 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
                 }
                 Ok(CargoMessage::CompilerMessage { rendered, .. }) => {
                     compiler_messages.push(rendered);
+                }
+                Ok(CargoMessage::BuildScriptOutput { linked_paths, .. }) => {
+                    link_paths.extend(linked_paths);
                 }
                 _ => {}
             },
@@ -110,6 +111,8 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
                 .with_note("compilation failure while running cargo")
         })?;
 
+    report_message!("extracted link paths: {}", link_paths.join(", "));
+
     let mut artifacts = Vec::new();
     for package in build.packages {
         let native_static_libs = native_static_libs.remove(&cargo_normalize_package_name(&package));
@@ -122,7 +125,7 @@ pub fn cargo_build(build: CargoBuild) -> Result<Vec<CargoArtifact>> {
         )?;
 
         if let Some(ref libs) = native_static_libs {
-            report_message!("extracted native-static-libs for {}: {}", package, libs);
+            report_message!("extracted native static libs for {}: {}", package, libs);
         }
 
         artifacts.push(CargoArtifact {
@@ -201,11 +204,80 @@ fn cargo_cmd() -> String {
     var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
+fn cargo_normalize_package_name(name: &str) -> String {
+    name.replace("-", "_")
+}
+
+fn cargo_output_path(
+    target: &Path,
+    profile: &str,
+    triple: &Triple,
+    package_name: &str,
+    crate_type: CargoCrateType,
+) -> Result<PathBuf> {
+    let package_name = cargo_normalize_package_name(package_name);
+    let filename = match (triple.operating_system, triple.environment, crate_type) {
+        (OperatingSystem::Linux, _, CargoCrateType::Cdylib) => {
+            format!("lib{}.so", package_name)
+        }
+        (OperatingSystem::Linux, _, CargoCrateType::Staticlib) => {
+            format!("lib{}.a", package_name)
+        }
+        (OperatingSystem::MacOSX(_), _, CargoCrateType::Cdylib)
+        | (OperatingSystem::Darwin(_), _, CargoCrateType::Cdylib) => {
+            format!("lib{}.dylib", package_name)
+        }
+        (OperatingSystem::MacOSX(_), _, CargoCrateType::Staticlib)
+        | (OperatingSystem::Darwin(_), _, CargoCrateType::Staticlib) => {
+            format!("lib{}.a", package_name)
+        }
+        (OperatingSystem::Windows, _, CargoCrateType::Cdylib) => {
+            format!("{}.dll", package_name)
+        }
+        (OperatingSystem::Windows, Environment::Msvc, CargoCrateType::Staticlib) => {
+            format!("{}.lib", package_name)
+        }
+        (OperatingSystem::Windows, _, CargoCrateType::Staticlib) => {
+            format!("lib{}.a", package_name)
+        }
+        _ => {
+            return Err(Error::new(format!(
+                "unsupported target: {} ",
+                triple.operating_system,
+            )));
+        }
+    };
+
+    let profile_dir = match profile {
+        "release" | "bench" => "release",
+        "dev" | "test" => "debug",
+        x => x,
+    };
+
+    Ok(target
+        .join(triple.to_string())
+        .join(profile_dir)
+        .join(filename))
+}
+
 #[derive(Debug)]
 enum CargoMessage {
-    NativeStaticLibs { package: String, libs: String },
-    CompilerMessage { rendered: String },
-    Other,
+    BuildScriptOutput {
+        #[allow(dead_code)]
+        linked_libs: Vec<String>,
+        linked_paths: Vec<String>,
+    },
+    NativeStaticLibs {
+        package: String,
+        libs: String,
+    },
+    CompilerMessage {
+        #[allow(dead_code)]
+        message: String,
+        #[allow(dead_code)]
+        package: String,
+        rendered: String,
+    },
 }
 
 impl FromStr for CargoMessage {
@@ -263,65 +335,42 @@ impl FromStr for CargoMessage {
                 });
             }
 
-            Ok(CargoMessage::CompilerMessage { rendered })
+            Ok(CargoMessage::CompilerMessage {
+                rendered,
+                message,
+                package,
+            })
+        } else if reason == "build-script-executed" {
+            let linked_libs = match value.remove("linked_libs") {
+                Some(JsonValue::Array(x)) => x
+                    .into_iter()
+                    .filter_map(|x| match x {
+                        JsonValue::String(x) => Some(x),
+                        _ => None,
+                    })
+                    .map(|x| x.as_str().to_string())
+                    .collect(),
+                _ => return Err(()),
+            };
+
+            let linked_paths = match value.remove("linked_paths") {
+                Some(JsonValue::Array(x)) => x
+                    .into_iter()
+                    .filter_map(|x| match x {
+                        JsonValue::String(x) => Some(x),
+                        _ => None,
+                    })
+                    .map(|x| x.as_str().to_string())
+                    .collect(),
+                _ => return Err(()),
+            };
+
+            Ok(CargoMessage::BuildScriptOutput {
+                linked_libs,
+                linked_paths,
+            })
         } else {
-            Ok(CargoMessage::Other)
+            Err(())
         }
     }
-}
-
-fn cargo_normalize_package_name(name: &str) -> String {
-    name.replace("-", "_")
-}
-
-fn cargo_output_path(
-    target: &Path,
-    profile: &str,
-    triple: &Triple,
-    package_name: &str,
-    crate_type: CargoCrateType,
-) -> Result<PathBuf> {
-    let package_name = cargo_normalize_package_name(package_name);
-    let filename = match (triple.operating_system, triple.environment, crate_type) {
-        (OperatingSystem::Linux, _, CargoCrateType::Cdylib) => {
-            format!("lib{}.so", package_name)
-        }
-        (OperatingSystem::Linux, _, CargoCrateType::Staticlib) => {
-            format!("lib{}.a", package_name)
-        }
-        (OperatingSystem::MacOSX(_), _, CargoCrateType::Cdylib)
-        | (OperatingSystem::Darwin(_), _, CargoCrateType::Cdylib) => {
-            format!("lib{}.dylib", package_name)
-        }
-        (OperatingSystem::MacOSX(_), _, CargoCrateType::Staticlib)
-        | (OperatingSystem::Darwin(_), _, CargoCrateType::Staticlib) => {
-            format!("lib{}.a", package_name)
-        }
-        (OperatingSystem::Windows, _, CargoCrateType::Cdylib) => {
-            format!("{}.dll", package_name)
-        }
-        (OperatingSystem::Windows, Environment::Msvc, CargoCrateType::Staticlib) => {
-            format!("{}.lib", package_name)
-        }
-        (OperatingSystem::Windows, _, CargoCrateType::Staticlib) => {
-            format!("lib{}.a", package_name)
-        }
-        _ => {
-            return Err(Error::new(format!(
-                "unsupported target: {} ",
-                triple.operating_system,
-            )));
-        }
-    };
-
-    let profile_dir = match profile {
-        "release" | "bench" => "release",
-        "dev" | "test" => "debug",
-        x => x,
-    };
-
-    Ok(target
-        .join(triple.to_string())
-        .join(profile_dir)
-        .join(filename))
 }

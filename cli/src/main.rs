@@ -83,16 +83,24 @@ fn main() {
             wait_unlink(&output_path)?;
             reflink(&artifact.path, &output_path)?;
 
-            if let Some(codesign) = codesign.as_ref() {
-                codesign_bundle(&output_path, Some(&codesign.identity))?;
-                notarize_bundle(
-                    &output_path,
-                    &codesign.team,
-                    &codesign.username,
-                    &codesign.password,
-                )?;
-            } else if cfg!(target_os = "macos") {
-                codesign_bundle(&output_path, None)?;
+            let is_apple = matches!(
+                artifact.target.operating_system(),
+                target_lexicon::OperatingSystem::MacOSX(_)
+                    | target_lexicon::OperatingSystem::Darwin(_)
+            );
+
+            if is_apple {
+                if let Some(codesign) = codesign.as_ref() {
+                    codesign_bundle(&output_path, Some(&codesign.identity))?;
+                    notarize_bundle(
+                        &output_path,
+                        &codesign.team,
+                        &codesign.username,
+                        &codesign.password,
+                    )?;
+                } else {
+                    codesign_bundle(&output_path, None)?;
+                }
             }
 
             if install && artifact.target.is_supported(&target_lexicon::HOST) {

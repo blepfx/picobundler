@@ -57,6 +57,14 @@ impl BuildTarget {
             ),
         }
     }
+
+    pub fn operating_system(&self) -> OperatingSystem {
+        match self {
+            Self::Triple(triple) => triple.operating_system.clone(),
+            Self::TripleGlibc(triple, _) => triple.operating_system.clone(),
+            Self::AppleUniversal => OperatingSystem::Darwin(None),
+        }
+    }
 }
 
 impl Display for BuildTarget {
